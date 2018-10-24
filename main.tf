@@ -8,6 +8,22 @@ terraform {
 
 data "aws_availability_zones" "this" {}
 
+data "aws_subnet" "external_public_subnets" {
+  count = "${!var.vpc_create && length(var.vpc_external_public_subnets_cidrs) > 0 ? length(var.vpc_external_public_subnets_cidrs) : 0}"
+
+  vpc_id = "${var.vpc_external_id}"
+
+  cidr_block = "${element(var.vpc_external_public_subnets_cidrs, count.index)}"
+}
+
+data "aws_subnet" "external_private_subnets" {
+  count = "${!var.vpc_create && length(var.vpc_external_private_subnets_cidrs) > 0 ? length(var.vpc_external_private_subnets_cidrs) : 0}"
+
+  vpc_id = "${var.vpc_external_id}"
+
+  cidr_block = "${element(var.vpc_external_private_subnets_cidrs, count.index)}"
+}
+
 module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
 
@@ -114,7 +130,7 @@ resource "aws_cloudwatch_log_group" "this" {
 # SECURITY GROUPS
 
 resource "aws_security_group" "web" {
-  vpc_id = "${module.vpc.vpc_id}"
+  vpc_id = "${var.vpc_create ? module.vpc.vpc_id : var.vpc_external_id}"
   name   = "${var.name}-${terraform.workspace}-web-sg"
 
   egress {
@@ -133,7 +149,7 @@ resource "aws_security_group" "web" {
 }
 
 resource "aws_security_group" "services" {
-  vpc_id = "${module.vpc.vpc_id}"
+  vpc_id = "${var.vpc_create ? module.vpc.vpc_id : var.vpc_external_id}"
   name   = "${var.name}-${terraform.workspace}-services-sg"
 
   egress {
@@ -163,7 +179,7 @@ resource "aws_lb_target_group" "this" {
   name        = "${var.name}-${element(keys(var.services), count.index)}-${random_id.target_group_sufix.hex}"
   port        = "${lookup(var.services[element(keys(var.services), count.index)], "container_port")}"
   protocol    = "HTTP"
-  vpc_id      = "${module.vpc.vpc_id}"
+  vpc_id      = "${var.vpc_create ? module.vpc.vpc_id : var.vpc_external_id}"
   target_type = "ip"
 
   lifecycle {
@@ -175,7 +191,7 @@ resource "aws_lb" "this" {
   count = "${length(var.services) > 0 ? length(var.services) : 0}"
 
   name            = "${var.name}-${terraform.workspace}-${element(keys(var.services), count.index)}-alb"
-  subnets         = ["${module.vpc.public_subnets}"]
+  subnets         = ["${var.vpc_create ? module.vpc.public_subnets : data.aws_subnet.external_public_subnets.*.id}"]
   security_groups = ["${aws_security_group.web.id}"]
 }
 
@@ -222,7 +238,12 @@ resource "aws_ecs_service" "this" {
 
   network_configuration {
     security_groups = ["${aws_security_group.services.id}"]
-    subnets         = ["${module.vpc.private_subnets}"]
+
+    subnets         = [
+      "${var.vpc_create ?
+      module.vpc.private_subnets : length(data.aws_subnet.external_private_subnets) > 0 ?
+      data.aws_subnet.external_private_subnets.*.id : data.aws_subnet.external_public_subnets.*.id}"
+    ]
 
     # assign_public_ip = true <- TODO: enable if development_mode is true
   }

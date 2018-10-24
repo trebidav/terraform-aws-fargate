@@ -32,6 +32,21 @@ variable "vpc_create" {
   default     = true
 }
 
+variable "vpc_external_id" {
+  description = "Id of an external VPC, in case you want to re-use a VPC already created. `vpc_create` must be false."
+  default     = ""
+}
+
+variable "vpc_external_public_subnets_cidrs" {
+  type    = "list"
+  default = []
+}
+
+variable "vpc_external_private_subnets_cidrs" {
+  type    = "list"
+  default = []
+}
+
 variable "vpc_cidr" {
   default = "10.0.0.0/16"
 }
