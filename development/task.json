@@ -1,0 +1,18 @@
+[
+  {
+    "portMappings": [
+      {
+        "hostPort": 80,
+        "protocol": "tcp",
+        "containerPort": 80
+      }
+    ],
+    "image": "805382315593.dkr.ecr.us-east-1.amazonaws.com/nginx_test:latest",
+    "name": "development_web_entry",
+    "command": ["/bin/bash" , "-c", "envsubst '\\$APP_HOST \\$APP_PORT' < /etc/nginx/nginx-template.conf > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"],
+    "environment": [
+      { "name": "APP_HOST", "value": "${app_host}" },
+      { "name": "APP_PORT", "value": "${app_port}" }
+    ]
+  }
+]

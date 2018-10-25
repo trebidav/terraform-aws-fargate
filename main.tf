@@ -21,8 +21,8 @@ module "vpc" {
   private_subnets = "${var.vpc_private_subnets}"
 
   # NAT gateway for private subnets
-  enable_nat_gateway = true
-  single_nat_gateway = true
+  enable_nat_gateway = "${!var.development_mode}"
+  single_nat_gateway = "${!var.development_mode}"
 
   # Every instance deployed within the VPC will get a hostname
   enable_dns_hostnames = true
@@ -90,6 +90,17 @@ data "template_file" "tasks" {
   }
 }
 
+data "template_file" "development" {
+  count = "${var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
+
+  template = "${file("${path.module}/development/task.json")}"
+
+  vars {
+    app_host = "${element(aws_service_discovery_service.development.*.name, count.index)}.${element(aws_service_discovery_private_dns_namespace.development.*.name, count.index)}"
+    app_port = "${lookup(var.services[element(keys(var.services), count.index)], "container_port")}"
+  }
+}
+
 resource "aws_ecs_task_definition" "this" {
   count = "${length(var.services) > 0 ? length(var.services) : 0}"
 
@@ -102,6 +113,20 @@ resource "aws_ecs_task_definition" "this" {
   execution_role_arn       = "${aws_iam_role.tasks.arn}"
   task_role_arn            = "${aws_iam_role.tasks.arn}"
 }
+
+resource "aws_ecs_task_definition" "development" {
+  count = "${var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
+
+  family                   = "${var.name}-${terraform.workspace}-development-web-entry"
+  container_definitions    = "${element(data.template_file.development.*.rendered, count.index)}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = "${aws_iam_role.tasks.arn}"
+  task_role_arn            = "${aws_iam_role.tasks.arn}"
+}
+
 
 resource "aws_cloudwatch_log_group" "this" {
   count = "${length(var.services) > 0 ? length(var.services) : 0}"
@@ -160,7 +185,7 @@ resource "random_id" "target_group_sufix" {
 }
 
 resource "aws_lb_target_group" "this" {
-  count = "${length(var.services) > 0 ? length(var.services) : 0}"
+  count = "${length(var.services) > 0 && !var.development_mode ? length(var.services) : 0}"
 
   name        = "${var.name}-${element(keys(var.services), count.index)}-${random_id.target_group_sufix.hex}"
   port        = "${lookup(var.services[element(keys(var.services), count.index)], "container_port")}"
@@ -174,7 +199,7 @@ resource "aws_lb_target_group" "this" {
 }
 
 resource "aws_lb" "this" {
-  count = "${length(var.services) > 0 ? length(var.services) : 0}"
+  count = "${length(var.services) > 0 && !var.development_mode ? length(var.services) : 0}"
 
   name            = "${var.name}-${terraform.workspace}-${element(keys(var.services), count.index)}-alb"
   subnets         = ["${module.vpc.public_subnets}"]
@@ -182,7 +207,7 @@ resource "aws_lb" "this" {
 }
 
 resource "aws_lb_listener" "this" {
-  count = "${length(var.services) > 0 ? length(var.services) : 0}"
+  count = "${length(var.services) > 0 && !var.development_mode ? length(var.services) : 0}"
 
   load_balancer_arn = "${element(aws_lb.this.*.arn, count.index)}"
   port              = "80"
@@ -197,43 +222,101 @@ resource "aws_lb_listener" "this" {
 
 # ECS SERVICES
 
-# resource "aws_iam_role" "service" {
-#   name               = "${var.name}-${terraform.workspace}-service-role"
-#   assume_role_policy = "${file("${path.module}/policies/ecs-service-role.json")}"
-# }
-
-# resource "aws_iam_role_policy" "service" {
-#   name   = "${var.name}-${terraform.workspace}-service-policy"
-#   policy = "${file("${path.module}/policies/ecs-service-role-policy.json")}"
-#   role   = "${aws_iam_role.service.id}"
-# }
-
 resource "aws_ecs_service" "this" {
-  count = "${length(var.services) > 0 ? length(var.services) : 0}"
+  count = "${!var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
 
   name            = "${element(keys(var.services), count.index)}"
   cluster         = "${aws_ecs_cluster.this.name}"
   task_definition = "${element(aws_ecs_task_definition.this.*.arn, count.index)}"
-  desired_count   = "${lookup(var.services[element(keys(var.services), count.index)], "replicas")}"
+  desired_count   = "${var.development_mode ? 1 : lookup(var.services[element(keys(var.services), count.index)], "replicas")}"
   launch_type     = "FARGATE"
 
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
-  # iam_role        = "${aws_iam_role.service.arn}" TODO: Not yet (?)
-
   network_configuration {
     security_groups = ["${element(aws_security_group.services.*.id, count.index)}"]
     subnets         = ["${module.vpc.private_subnets}"]
-
-    # assign_public_ip = true <- TODO: enable if development_mode is true
   }
+
   load_balancer {
     target_group_arn = "${element(aws_lb_target_group.this.*.arn, count.index)}"
     container_name   = "${element(keys(var.services), count.index)}"
     container_port   = "${lookup(var.services[element(keys(var.services), count.index)], "container_port")}"
   }
+
   depends_on = ["aws_lb_target_group.this", "aws_lb_listener.this"]
+}
+
+resource "aws_ecs_service" "this_dev" {
+  count = "${var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
+
+  name            = "${element(keys(var.services), count.index)}"
+  cluster         = "${aws_ecs_cluster.this.name}"
+  task_definition = "${element(aws_ecs_task_definition.this.*.arn, count.index)}"
+  desired_count   = "1"
+  launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+
+  network_configuration {
+    security_groups  = ["${aws_security_group.services.id}"]
+    subnets          = ["${module.vpc.public_subnets}"]
+    assign_public_ip = true
+  }
+
+  service_registries {
+    registry_arn = "${element(aws_service_discovery_service.development.*.arn, count.index)}"
+  }
+
+  depends_on = ["aws_ecs_service.development"]
+}
+
+resource "aws_ecs_service" "development" {
+  count = "${var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
+
+  name = "development_web_entry"
+  cluster         = "${aws_ecs_cluster.this.name}"
+  task_definition = "${element(aws_ecs_task_definition.development.*.arn, count.index)}"
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  network_configuration {
+    security_groups  = ["${aws_security_group.web.id}"]
+    subnets          = ["${module.vpc.public_subnets}"]
+    assign_public_ip = true
+  }
+}
+
+# Service Discovery for Development Mode
+
+resource "aws_service_discovery_private_dns_namespace" "development" {
+  count = "${var.development_mode ? 1 : 0}"
+
+  name = "${var.name}.${terraform.workspace}.development"
+  vpc  = "${module.vpc.vpc_id}"
+}
+
+resource "aws_service_discovery_service" "development" {
+  count = "${var.development_mode && length(var.services) > 0 ? length(var.services) : 0}"
+
+  name = "${element(keys(var.services), count.index)}"
+
+  dns_config {
+    namespace_id = "${aws_service_discovery_private_dns_namespace.development.id}"
+    dns_records {
+      ttl = 15
+      type = "A"
+    }
+  }
+
+  health_check_custom_config {
+    failure_threshold = 2
+  }
 }
 
 # CODEBUILD
