@@ -261,7 +261,7 @@ resource "aws_ecs_service" "this_dev" {
   deployment_maximum_percent         = 100
 
   network_configuration {
-    security_groups  = ["${aws_security_group.services.id}"]
+    security_groups  = ["${element(aws_security_group.services.*.id, count.index)}"]
     subnets          = ["${module.vpc.public_subnets}"]
     assign_public_ip = true
   }
